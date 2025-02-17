@@ -1,0 +1,5 @@
+python==3.8
+opencv-python==4.5.3.56
+mediapipe==0.8.6
+playsound==1.2.2
+streamlit==0.84.0

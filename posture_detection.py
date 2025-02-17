@@ -1,15 +1,29 @@
+from flask import Flask, jsonify, request
 import cv2
 import mediapipe as mp
 import math
 import threading
 from playsound import playsound
 
+app = Flask(__name__)
+
 # Constants for exercise angles
-HAND_RAISE_MIN_ANGLE = 150  # Minimum angle for hand raise
-HAND_CURL_MAX_ANGLE = 120   # Maximum angle for hand curl
+HAND_RAISE_MIN_ANGLE = 150
+HAND_CURL_MAX_ANGLE = 120
+SHOULDER_PRESS_MIN_ANGLE = 160
+
+wrong_posture_detected = False
+cap = None
+running = False
+exercise_type = "hand_raise"
+
+# MediaPipe Pose setup
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+mp_draw = mp.solutions.drawing_utils
 
 def calculate_angle(a, b, c):
-    """Calculates angle at point b"""
+    """Calculates the angle at point b"""
     ba = (a[0] - b[0], a[1] - b[1])
     bc = (c[0] - b[0], c[1] - b[1])
     
@@ -23,120 +37,98 @@ def calculate_angle(a, b, c):
     angle_rad = math.acos(dot_product / (magnitude_ba * magnitude_bc))
     return math.degrees(angle_rad)
 
-def is_exercise_incorrect(shoulder_angle, elbow_angle, exercise_type):
-    """Check if exercise form is incorrect"""
-    if exercise_type == "hand_raise":
-        return shoulder_angle < HAND_RAISE_MIN_ANGLE  # Only detect if arm not raised enough
-    elif exercise_type == "hand_curl":
-        return elbow_angle > HAND_CURL_MAX_ANGLE     # Only detect if arm extended too much
+def is_exercise_incorrect(shoulder_angle, elbow_angle, exercise):
+    """Checks if posture is incorrect"""
+    if exercise == "hand_raise":
+        return shoulder_angle < HAND_RAISE_MIN_ANGLE
+    elif exercise == "hand_curl":
+        return elbow_angle > HAND_CURL_MAX_ANGLE
+    elif exercise == "shoulder_press":
+        return shoulder_angle < SHOULDER_PRESS_MIN_ANGLE
     return False
 
 def play_alarm_sound():
-    try:
+    """Plays an alarm sound when incorrect posture is detected"""
+    global wrong_posture_detected
+    if wrong_posture_detected:
         playsound('alarm.wav')
-    except Exception as e:
-        print("Error playing sound:", e)
 
 def get_landmark_coords(landmarks, landmark_point, w, h):
-    """Get coordinates for a landmark point"""
+    """Extracts landmark coordinates"""
     return (
         int(landmarks[landmark_point].x * w),
         int(landmarks[landmark_point].y * h)
     )
 
-def main():
+def detect_posture():
+    """Runs OpenCV posture analysis"""
+    global wrong_posture_detected, cap, running, exercise_type
     cap = cv2.VideoCapture(0)
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    mp_draw = mp.solutions.drawing_utils
-
-    exercise_type = "hand_raise"
+    running = True
     wrong_form_counter = 0
     threshold_wrong_frames = 30
 
-    while cap.isOpened():
+    while cap.isOpened() and running:
         ret, frame = cap.read()
         if not ret:
-            break
+            continue
 
         frame = cv2.flip(frame, 1)
         image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        image_rgb.flags.writeable = False
         results = pose.process(image_rgb)
-        image_rgb.flags.writeable = True
         image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
         if results.pose_landmarks:
-            mp_draw.draw_landmarks(
-                image, 
-                results.pose_landmarks, 
-                mp_pose.POSE_CONNECTIONS
-            )
+            mp_draw.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
             h, w, _ = image.shape
             landmarks = results.pose_landmarks.landmark
 
-            # Get required landmarks
             left_wrist = get_landmark_coords(landmarks, mp_pose.PoseLandmark.LEFT_WRIST.value, w, h)
             left_elbow = get_landmark_coords(landmarks, mp_pose.PoseLandmark.LEFT_ELBOW.value, w, h)
             left_shoulder = get_landmark_coords(landmarks, mp_pose.PoseLandmark.LEFT_SHOULDER.value, w, h)
             left_hip = get_landmark_coords(landmarks, mp_pose.PoseLandmark.LEFT_HIP.value, w, h)
 
-            # Calculate angles
             shoulder_angle = calculate_angle(left_elbow, left_shoulder, left_hip)
             elbow_angle = calculate_angle(left_wrist, left_elbow, left_shoulder)
 
-            # Display exercise info
-            cv2.putText(image, f'Exercise: {exercise_type.replace("_", " ").title()}',
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            # Display relevant angle
-            if exercise_type == "hand_raise":
-                cv2.putText(image, f'Shoulder Angle: {int(shoulder_angle)}°',
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            else:
-                cv2.putText(image, f'Elbow Angle: {int(elbow_angle)}°',
-                           (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-
-            # Check exercise form and display warnings
             if is_exercise_incorrect(shoulder_angle, elbow_angle, exercise_type):
                 wrong_form_counter += 1
-                
-                # Display specific warnings for incorrect form
-                if exercise_type == "hand_raise":
-                    cv2.putText(image, "Warning: Raise your arm higher",
-                              (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                else:  # hand_curl
-                    cv2.putText(image, "Warning: Curl your arm more",
-                              (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-                # Trigger alarm after threshold
                 if wrong_form_counter >= threshold_wrong_frames:
-                    cv2.putText(image, "ALARM: Fix Your Form!",
-                              (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                    wrong_posture_detected = True
                     threading.Thread(target=play_alarm_sound, daemon=True).start()
                     wrong_form_counter = 0
             else:
                 wrong_form_counter = 0
-                cv2.putText(image, "Good Form!", (10, 90),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                wrong_posture_detected = False
 
-        cv2.imshow("Exercise Monitor", image)
-        
-        # Key controls
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC to exit
+        cv2.imshow("Posture Detection", image)
+        if cv2.waitKey(1) & 0xFF == 27:
+            running = False
             break
-        elif key == ord('r'):  # 'r' for hand raise
-            exercise_type = "hand_raise"
-        elif key == ord('c'):  # 'c' for hand curl
-            exercise_type = "hand_curl"
 
     cap.release()
     cv2.destroyAllWindows()
 
-if __name__ == "__main__":
-    main()
+@app.route('/start', methods=['GET'])
+def start_posture_detection():
+    """Starts the posture detection"""
+    global running
+    if not running:
+        threading.Thread(target=detect_posture, daemon=True).start()
+    return jsonify({"status": "Posture detection started"})
+
+@app.route('/status', methods=['GET'])
+def get_posture_status():
+    """Gets the current posture status"""
+    return jsonify({"wrong_posture": wrong_posture_detected})
+
+@app.route('/stop', methods=['GET'])
+def stop_posture_detection():
+    """Stops the posture detection"""
+    global running
+    running = False
+    return jsonify({"status": "Posture detection stopped"})
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
